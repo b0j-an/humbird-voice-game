@@ -3,6 +3,7 @@ import './globals.css';
 import './game.css';
 
 export const metadata: Metadata = {
+  metadataBase: new URL('https://million-dollar-creator-blueprint.cosmic-chick-1687.chatgpt.site'),
   title: 'HumBird — Speak Up. Fly Higher.',
   description: 'A cheerful voice-controlled sky arcade where louder speech gives a tiny bird more lift.',
   icons: { icon: '/favicon.svg' },
