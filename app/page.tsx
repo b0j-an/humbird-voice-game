@@ -11,7 +11,7 @@ import {
   type GamePhase,
   type GameState,
 } from './game-core';
-import { analyzePitch, median, normalizePitch, semitoneDistance, type CalibrationProfile, type PitchSample } from './pitch';
+import { analyzeVoiceLevel, followVoicePower, voicePowerFromLevel, type VoiceSample } from './voice';
 
 type AudioRig = {
   stream: MediaStream;
@@ -20,9 +20,7 @@ type AudioRig = {
   samples: Float32Array<ArrayBuffer>;
 };
 
-type Capture = { kind: 'low' | 'high'; startedAt: number; samples: number[] };
-
-const initialPitch: PitchSample = { frequency: null, confidence: 0, level: 0, timestamp: 0, voiced: false };
+const initialVoice: VoiceSample = { level: 0, peak: 0, decibels: -100, timestamp: 0, active: false };
 
 function roundedRect(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number) {
   ctx.beginPath();
@@ -107,19 +105,12 @@ export default function Home() {
   const audioRef = useRef<AudioRig | null>(null);
   const gameRef = useRef<GameState>(createGame());
   const phaseRef = useRef<GamePhase>('intro');
-  const profileRef = useRef<CalibrationProfile | null>(null);
-  const captureRef = useRef<Capture | null>(null);
-  const finishCaptureRef = useRef<(capture: Capture) => void>(() => undefined);
   const liftRef = useRef(0);
-  const lastVoicedRef = useRef(0);
   const lastUiRef = useRef(0);
   const [phase, setPhase] = useState<GamePhase>('intro');
-  const [pitch, setPitch] = useState<PitchSample>(initialPitch);
+  const [voice, setVoice] = useState<VoiceSample>(initialVoice);
   const [micOn, setMicOn] = useState(false);
   const [liftPercent, setLiftPercent] = useState(0);
-  const [profile, setProfile] = useState<CalibrationProfile | null>(null);
-  const [lowFrequency, setLowFrequency] = useState<number | null>(null);
-  const [captureProgress, setCaptureProgress] = useState(0);
   const [countdown, setCountdown] = useState(3);
   const [score, setScore] = useState(0);
   const [highScore, setHighScore] = useState(0);
@@ -142,8 +133,8 @@ export default function Home() {
     const rig = audioRef.current;
     rig?.stream.getTracks().forEach((track) => track.stop());
     if (rig && rig.context.state !== 'closed') void rig.context.close();
-    audioRef.current = null; profileRef.current = null; captureRef.current = null; liftRef.current = 0;
-    setMicOn(false); setLiftPercent(0); setProfile(null); setLowFrequency(null); setPitch(initialPitch); setError(''); changePhase('intro');
+    audioRef.current = null; liftRef.current = 0;
+    setMicOn(false); setLiftPercent(0); setVoice(initialVoice); setError(''); changePhase('intro');
   }, [changePhase]);
 
   const enableMicrophone = useCallback(async () => {
@@ -155,41 +146,17 @@ export default function Home() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false }, video: false });
       const context = new AudioContext({ latencyHint: 'interactive' });
       await context.resume();
-      const analyser = context.createAnalyser(); analyser.fftSize = 2048; analyser.smoothingTimeConstant = .05;
+      const analyser = context.createAnalyser(); analyser.fftSize = 1024; analyser.smoothingTimeConstant = 0;
       context.createMediaStreamSource(stream).connect(analyser);
       audioRef.current = { stream, context, analyser, samples: new Float32Array(analyser.fftSize) };
       setMicOn(true);
-      changePhase('calibration-low');
+      changePhase('ready');
     } catch (reason) {
       const name = reason instanceof DOMException ? reason.name : '';
       const message = name === 'NotAllowedError' ? 'Microphone permission was denied. Allow access in your browser, then try again.' : name === 'NotFoundError' ? 'No microphone was found. Connect one and try again.' : 'The microphone could not start. Check that another app is not using it, then retry.';
       setError(message); changePhase('microphone-error');
     }
   }, [changePhase]);
-
-  const finishCapture = useCallback((capture: Capture) => {
-    setCaptureProgress(0);
-    if (capture.samples.length < 12) {
-      setError('I could not hear a steady note. Move closer to the microphone and hold the sound a little longer.'); return;
-    }
-    const frequency = median(capture.samples);
-    if (capture.kind === 'low') {
-      setLowFrequency(frequency); setError(''); changePhase('calibration-high'); return;
-    }
-    if (!lowFrequency || frequency <= lowFrequency || semitoneDistance(lowFrequency, frequency) < 4) {
-      setError('Your high note needs to be at least four semitones above the low note. Try a brighter, comfortable note.'); return;
-    }
-    const nextProfile = { lowFrequency, highFrequency: frequency, noiseThreshold: .012 };
-    profileRef.current = nextProfile; setProfile(nextProfile); setError(''); changePhase('ready');
-  }, [changePhase, lowFrequency]);
-  useEffect(() => { finishCaptureRef.current = finishCapture; }, [finishCapture]);
-
-  const captureNote = useCallback((kind: 'low' | 'high') => {
-    const rig = audioRef.current;
-    if (!rig) return;
-    void rig.context.resume(); setError(''); setCaptureProgress(.01);
-    captureRef.current = { kind, startedAt: performance.now(), samples: [] };
-  }, []);
 
   const startFlight = useCallback(() => {
     gameRef.current = createGame(); liftRef.current = 0; setScore(0); setCountdown(3); changePhase('countdown');
@@ -218,28 +185,14 @@ export default function Home() {
     const loop = (now: number) => {
       const dt = Math.min((now - previous) / 1000, .05); previous = now;
       const rig = audioRef.current;
-      let sample = initialPitch;
+      let sample = initialVoice;
       if (rig) {
         if (rig.context.state === 'suspended' && phaseRef.current === 'playing') changePhase('paused');
         rig.analyser.getFloatTimeDomainData(rig.samples);
-        sample = analyzePitch(rig.samples, rig.context.sampleRate, profileRef.current?.noiseThreshold ?? .012, now);
-        if (sample.voiced && sample.frequency) {
-          lastVoicedRef.current = now;
-          if (profileRef.current) {
-            const target = normalizePitch(sample.frequency, profileRef.current);
-            liftRef.current += (target - liftRef.current) * .24;
-          }
-        } else if (now - lastVoicedRef.current > 80) {
-          liftRef.current *= Math.max(0, 1 - dt / .12);
-        }
-        if (now - lastUiRef.current > 70) { setPitch(sample); setLiftPercent(Math.round(liftRef.current * 100)); lastUiRef.current = now; }
-        const capture = captureRef.current;
-        if (capture) {
-          const elapsed = now - capture.startedAt;
-          setCaptureProgress(Math.min(1, elapsed / 1500));
-          if (sample.voiced && sample.frequency && sample.confidence >= .72) capture.samples.push(sample.frequency);
-          if (elapsed >= 1500) { captureRef.current = null; finishCaptureRef.current(capture); }
-        }
+        sample = analyzeVoiceLevel(rig.samples, .008, now);
+        const targetPower = voicePowerFromLevel(sample.level, .01, .14);
+        liftRef.current = followVoicePower(liftRef.current, targetPower);
+        if (now - lastUiRef.current > 45) { setVoice(sample); setLiftPercent(Math.round(liftRef.current * 100)); lastUiRef.current = now; }
       }
       if (phaseRef.current === 'playing') {
         accumulator += dt;
@@ -258,8 +211,7 @@ export default function Home() {
     return () => cancelAnimationFrame(frame);
   }, [changePhase]);
 
-  const levelPercent = Math.min(100, Math.round(pitch.level * 1200));
-  const rangeLabel = profile ? `${Math.round(profile.lowFrequency)}–${Math.round(profile.highFrequency)} Hz` : 'Not calibrated';
+  const levelPercent = Math.min(100, Math.round(voice.level * 700));
 
   return (
     <main className="site-shell">
@@ -275,11 +227,11 @@ export default function Home() {
       <section className="hero" id="game">
         <div className="hero-copy">
           <p className="eyebrow">YOUR VOICE. YOUR WINGS.</p>
-          <h1>Hum high.<br />Fly <em>higher.</em></h1>
-          <p className="lede">Guide a tiny bird through a very big sky using nothing but the pitch of your voice.</p>
+          <h1>Speak up.<br />Fly <em>higher.</em></h1>
+          <p className="lede">Every sound gives lift. Speak softly to hover, get louder to climb, and go quiet to glide down.</p>
           {phase === 'intro' && <button className="primary-button" type="button" onClick={enableMicrophone}><span className="button-icon">●</span>Enable microphone<span aria-hidden="true">↗</span></button>}
           {phase === 'microphone-error' && <button className="primary-button" type="button" onClick={enableMicrophone}><span className="button-icon">↻</span>Try microphone again<span aria-hidden="true">↗</span></button>}
-          {micOn && phase !== 'intro' && phase !== 'microphone-error' && <div className="range-summary"><span>YOUR RANGE</span><strong>{rangeLabel}</strong><small>Higher pitch = stronger lift</small></div>}
+          {micOn && phase !== 'intro' && phase !== 'microphone-error' && <div className="range-summary"><span>VOICE POWER</span><strong>{liftPercent}%</strong><small>Any speech works · louder = more lift</small></div>}
           <p className="privacy">Audio is analyzed on this device. Nothing is recorded or uploaded.</p>
         </div>
 
@@ -287,23 +239,15 @@ export default function Home() {
           <canvas ref={canvasRef} className="game-canvas" aria-label="HumBird voice-controlled game field" />
           <div className="score-hud" aria-live="polite"><span>SCORE</span><strong>{score}</strong><small>BEST {highScore}</small></div>
           <div className="pitch-card" aria-live="polite">
-            <span>LIVE PITCH</span><strong>{pitch.voiced && pitch.frequency ? `${Math.round(pitch.frequency)} Hz` : '— Hz'}</strong>
+            <span>VOICE POWER</span><strong>{micOn ? `${liftPercent}%` : '—'}</strong>
             <div className="level-track" title="Microphone input level"><i style={{ width: `${levelPercent}%` }} /></div>
             <div className="pitch-scale"><i className={liftPercent > 5 ? 'active' : ''}/><i className={liftPercent > 25 ? 'active' : ''}/><i className={liftPercent > 45 ? 'active' : ''}/><i className={liftPercent > 65 ? 'active' : ''}/><i className={liftPercent > 85 ? 'active' : ''}/></div>
-            <small>LOW <b>HOVER</b> HIGH</small>
+            <small>QUIET <b>HOVER</b> SHOUT</small>
           </div>
 
           <div className={`game-overlay ${phase === 'playing' ? 'is-hidden' : ''}`}>
-            {phase === 'intro' && <div className="game-panel compact"><span className="panel-step">READY WHEN YOU ARE</span><h2>First, meet your mic.</h2><p>Enable it to teach HumBird your comfortable vocal range.</p></div>}
-            {(phase === 'calibration-low' || phase === 'calibration-high') && <div className="game-panel">
-              <span className="panel-step">CALIBRATION · {phase === 'calibration-low' ? '1 OF 2' : '2 OF 2'}</span>
-              <h2>{phase === 'calibration-low' ? 'Hum a comfy low note.' : 'Now hum a comfy high note.'}</h2>
-              <p>Use “mmm,” “oo,” or “ah.” Keep it steady and comfortable—never strain.</p>
-              <div className="capture-visual"><i style={{ width: `${captureProgress * 100}%` }} /></div>
-              <button className="panel-button" type="button" onClick={() => captureNote(phase === 'calibration-low' ? 'low' : 'high')} disabled={captureProgress > 0}>{captureProgress > 0 ? 'Listening…' : `Capture ${phase === 'calibration-low' ? 'low' : 'high'} note`}</button>
-              {error && <p className="inline-error" role="alert">{error}</p>}
-            </div>}
-            {phase === 'ready' && <div className="game-panel"><span className="panel-step">CALIBRATION COMPLETE</span><h2>Your wings are tuned.</h2><p>Low notes let you descend. Your midpoint hovers. High notes lift you toward the clouds.</p><button className="panel-button" type="button" onClick={startFlight}>Start flight</button></div>}
+            {phase === 'intro' && <div className="game-panel compact"><span className="panel-step">READY WHEN YOU ARE</span><h2>First, meet your mic.</h2><p>Enable it, then speak normally. No special note or sustained hum is required.</p></div>}
+            {phase === 'ready' && <div className="game-panel"><span className="panel-step">MICROPHONE READY</span><h2>Say something.</h2><p>Try “ahx,” a sentence, or any vocal sound. Watch voice power react instantly—then get louder to climb.</p><button className="panel-button" type="button" onClick={startFlight}>Start flight</button></div>}
             {phase === 'countdown' && <div className="countdown" aria-live="assertive">{countdown || 'GO'}</div>}
             {phase === 'paused' && <div className="game-panel compact"><span className="panel-step">FLIGHT PAUSED</span><h2>Catch your breath.</h2><p>The game pauses whenever this tab loses focus.</p><button className="panel-button" type="button" onClick={startFlight}>Restart flight</button></div>}
             {phase === 'game-over' && <div className="game-panel game-over-panel"><span className="panel-step">FLIGHT COMPLETE</span><h2>{score > 0 ? 'Beautiful flying.' : 'Almost airborne!'}</h2><div className="final-score"><span>Score <b>{score}</b></span><span>Best <b>{highScore}</b></span></div><button className="panel-button" type="button" onClick={startFlight}>Fly again</button></div>}
@@ -313,8 +257,8 @@ export default function Home() {
       </section>
 
       <section className="how-it-works" aria-label="How to play">
-        <article><span>01</span><h2>Find your range</h2><p>Hum one comfortable low note, then one comfortable high note.</p></article>
-        <article><span>02</span><h2>Shape your flight</h2><p>Higher pitch adds lift. Lower pitch eases down. Silence lets gravity take over.</p></article>
+        <article><span>01</span><h2>Use any words</h2><p>Say “ahx,” talk, sing, or hum. Short sounds and normal speech both create lift.</p></article>
+        <article><span>02</span><h2>Shape your volume</h2><p>Speak softly to hover, get louder to climb, and let silence bring you back down.</p></article>
         <article><span>03</span><h2>Thread the sky</h2><p>Pass every gate, build your score, and keep your longest flight alive.</p></article>
       </section>
     </main>

@@ -10,14 +10,12 @@ import {
   liftFromNormalizedPitch,
   stepGame,
 } from './game-core.ts';
-import { analyzePitch, normalizePitch, semitoneDistance } from './pitch.ts';
+import { analyzeVoiceLevel, followVoicePower, voicePowerFromLevel } from './voice.ts';
 
-test('pitch range is logarithmic and clamped', () => {
-  const profile = { lowFrequency: 100, highFrequency: 400, noiseThreshold: .01 };
-  assert.equal(normalizePitch(50, profile), 0);
-  assert.ok(Math.abs(normalizePitch(200, profile) - .5) < .0001);
-  assert.equal(normalizePitch(800, profile), 1);
-  assert.ok(Math.abs(semitoneDistance(220, 440) - 12) < .0001);
+test('voice power responds to loudness and clamps safely', () => {
+  assert.equal(voicePowerFromLevel(.005), 0);
+  assert.ok(voicePowerFromLevel(.05) > .45);
+  assert.equal(voicePowerFromLevel(.3), 1);
 });
 
 test('midpoint pitch counters gravity', () => {
@@ -26,15 +24,21 @@ test('midpoint pitch counters gravity', () => {
   assert.equal(liftFromNormalizedPitch(-1), 0);
 });
 
-test('pitch detector finds steady tones and rejects silence', () => {
-  const sampleRate = 48_000;
-  const tone = new Float32Array(2048);
-  for (let i = 0; i < tone.length; i += 1) tone[i] = Math.sin(2 * Math.PI * 220 * i / sampleRate) * .35;
-  const detected = analyzePitch(tone, sampleRate, .01, 0);
-  assert.equal(detected.voiced, true);
-  assert.ok(detected.frequency !== null && Math.abs(detected.frequency - 220) < 3, `detected ${detected.frequency}`);
-  const silence = analyzePitch(new Float32Array(2048), sampleRate, .01, 0);
-  assert.equal(silence.voiced, false);
+test('voice analyzer accepts short noisy speech-like bursts and rejects silence', () => {
+  const burst = new Float32Array(1024);
+  for (let i = 0; i < burst.length; i += 1) burst[i] = (Math.sin(i * .21) + Math.sin(i * .47) * .4) * .08;
+  const detected = analyzeVoiceLevel(burst, .01, 0);
+  assert.equal(detected.active, true);
+  assert.ok(detected.level > .04);
+  const silence = analyzeVoiceLevel(new Float32Array(1024), .01, 0);
+  assert.equal(silence.active, false);
+});
+
+test('voice envelope attacks faster than it releases', () => {
+  const attack = followVoicePower(0, 1);
+  const release = followVoicePower(1, 0);
+  assert.ok(attack > .6);
+  assert.ok(release > attack);
 });
 
 test('difficulty increases without becoming unfair', () => {

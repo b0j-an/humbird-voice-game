@@ -8,8 +8,6 @@ export const MAX_THRUST = GRAVITY * 2;
 
 export type GamePhase =
   | 'intro'
-  | 'calibration-low'
-  | 'calibration-high'
   | 'ready'
   | 'countdown'
   | 'playing'
