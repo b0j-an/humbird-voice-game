@@ -1,18 +1,20 @@
 import type { Metadata } from 'next';
 import './globals.css';
+import './game.css';
 
 export const metadata: Metadata = {
-  title: 'Million Dollar Creator — The YouTube Wealth Blueprint',
-  description: 'A practical four-phase roadmap for building your first million-dollar YouTube business.',
+  title: 'HumBird — Hum High. Fly Higher.',
+  description: 'A cheerful voice-controlled sky arcade where the pitch of your hum controls a tiny bird’s lift.',
+  icons: { icon: '/favicon.svg' },
   openGraph: {
-    title: 'Million Dollar Creator',
-    description: 'The YouTube Wealth Blueprint',
+    title: 'HumBird — Hum High. Fly Higher.',
+    description: 'Use the pitch of your voice to fly through a bright, musical sky.',
     images: [{ url: '/og.png', width: 1200, height: 630 }],
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'Million Dollar Creator',
-    description: 'The YouTube Wealth Blueprint',
+    title: 'HumBird — Hum High. Fly Higher.',
+    description: 'Use the pitch of your voice to fly through a bright, musical sky.',
     images: ['/og.png'],
   },
 };
