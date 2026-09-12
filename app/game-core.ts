@@ -3,7 +3,7 @@ export const WORLD_HEIGHT = 600;
 export const GROUND_HEIGHT = 82;
 export const BIRD_X = 235;
 export const BIRD_RADIUS = 19;
-export const GRAVITY = 760;
+export const GRAVITY = 640;
 export const MAX_THRUST = GRAVITY * 2;
 
 export type GamePhase =
@@ -47,9 +47,9 @@ export function createGame(): GameState {
 
 export function difficultyForScore(score: number) {
   return {
-    speed: 172 + Math.min(score * 4.5, 70),
-    gapSize: 252 - Math.min(score * 3.5, 62),
-    spawnEvery: 1.78 - Math.min(score * 0.018, 0.22),
+    speed: 158 + Math.min(score * 4, 58),
+    gapSize: 288 - Math.min(score * 3, 55),
+    spawnEvery: 1.95 - Math.min(score * 0.016, 0.2),
   };
 }
 
@@ -97,7 +97,7 @@ export function stepGame(state: GameState, dt: number, normalizedPitch: number):
   };
 
   const acceleration = GRAVITY - liftFromNormalizedPitch(normalizedPitch);
-  next.birdVelocity = Math.max(-430, Math.min(470, state.birdVelocity + acceleration * safeDt));
+  next.birdVelocity = Math.max(-395, Math.min(425, state.birdVelocity + acceleration * safeDt));
   next.birdY = state.birdY + next.birdVelocity * safeDt;
 
   const difficulty = difficultyForScore(next.score);
