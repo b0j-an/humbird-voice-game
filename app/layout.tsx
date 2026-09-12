@@ -2,8 +2,14 @@ import type { Metadata } from 'next';
 import './globals.css';
 import './game.css';
 
+const siteUrl =
+  process.env.NEXT_PUBLIC_SITE_URL ??
+  (process.env.VERCEL_PROJECT_PRODUCTION_URL
+    ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`
+    : 'http://localhost:3000');
+
 export const metadata: Metadata = {
-  metadataBase: new URL('https://million-dollar-creator-blueprint.cosmic-chick-1687.chatgpt.site'),
+  metadataBase: new URL(siteUrl),
   title: 'HumBird — Speak Up. Fly Higher.',
   description: 'A cheerful voice-controlled sky arcade where louder speech gives a tiny bird more lift.',
   icons: { icon: '/favicon.svg' },
