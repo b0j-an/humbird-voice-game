@@ -215,10 +215,13 @@ export default function Home() {
         rig.analyser.getFloatTimeDomainData(rig.samples);
         const phaseNow = phaseRef.current;
         const listening = phaseNow === 'ready' || phaseNow === 'countdown' || phaseNow === 'playing';
-        sample = analyzeVoiceLevel(rig.samples, calibrationRef.current.noiseFloor * 1.6, now);
-        if (listening) calibrationRef.current = updateCalibration(calibrationRef.current, sample.level, dt);
+        const measured = analyzeVoiceLevel(rig.samples, calibrationRef.current.noiseFloor, now);
+        if (listening) calibrationRef.current = updateCalibration(calibrationRef.current, measured.level, dt);
         const voiceRange = rangeFromCalibration(calibrationRef.current, sensitivityRef.current);
-        const targetPower = voicePowerFromCalibration(sample.level, calibrationRef.current, sensitivityRef.current);
+        // Report the gate the game actually uses, so the meter cannot read "silent"
+        // while the same input is producing lift.
+        sample = { ...measured, active: measured.level > voiceRange.quiet };
+        const targetPower = voicePowerFromCalibration(measured.level, calibrationRef.current, sensitivityRef.current);
         liftRef.current = followVoicePower(liftRef.current, targetPower);
         if (now - lastUiRef.current > 45) { setVoice(sample); setLiftPercent(Math.round(liftRef.current * 100)); setRange(voiceRange); lastUiRef.current = now; }
       }
