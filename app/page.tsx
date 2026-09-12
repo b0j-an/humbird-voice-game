@@ -34,6 +34,18 @@ type AudioRig = {
 
 const initialVoice: VoiceSample = { level: 0, peak: 0, decibels: -100, timestamp: 0, active: false };
 
+type FullscreenTarget = HTMLDivElement & { webkitRequestFullscreen?: () => Promise<void> | void };
+type FullscreenDocument = Document & {
+  webkitFullscreenElement?: Element | null;
+  webkitExitFullscreen?: () => Promise<void> | void;
+};
+type LockableOrientation = ScreenOrientation & { lock?: (orientation: string) => Promise<void> };
+
+function nativeFullscreenElement() {
+  const doc = document as FullscreenDocument;
+  return doc.fullscreenElement ?? doc.webkitFullscreenElement ?? null;
+}
+
 function roundedRect(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number) {
   ctx.beginPath();
   ctx.roundRect(x, y, width, height, radius);
@@ -114,6 +126,10 @@ function drawGame(canvas: HTMLCanvasElement, game: GameState, lift: number, now:
 
 export default function Home() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const frameRef = useRef<HTMLDivElement>(null);
+  // iOS Safari refuses element fullscreen, so we fall back to a fixed-position
+  // layer. This tracks that we are in the fallback, since the browser will not.
+  const immersiveRef = useRef(false);
   const audioRef = useRef<AudioRig | null>(null);
   const gameRef = useRef<GameState>(createGame());
   const phaseRef = useRef<GamePhase>('intro');
@@ -129,6 +145,7 @@ export default function Home() {
   const [score, setScore] = useState(0);
   const [highScore, setHighScore] = useState(0);
   const [error, setError] = useState('');
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [sensitivity, setSensitivity] = useState(SENSITIVITY_INITIAL);
   const [range, setRange] = useState<VoiceRange>(() => rangeFromCalibration(createCalibration(), SENSITIVITY_INITIAL));
 
@@ -257,6 +274,58 @@ export default function Home() {
     liftRef.current = 0;
   }, []);
 
+  const exitFullscreen = useCallback(async () => {
+    const doc = document as FullscreenDocument;
+    if (doc.fullscreenElement) await doc.exitFullscreen().catch(() => {});
+    else if (doc.webkitFullscreenElement) await doc.webkitExitFullscreen?.();
+    immersiveRef.current = false;
+    setIsFullscreen(false);
+  }, []);
+
+  const toggleFullscreen = useCallback(async () => {
+    const frame = frameRef.current;
+    if (!frame) return;
+    if (nativeFullscreenElement() || immersiveRef.current) { await exitFullscreen(); return; }
+
+    const target = frame as FullscreenTarget;
+    try {
+      if (target.requestFullscreen) await target.requestFullscreen({ navigationUI: 'hide' });
+      else if (target.webkitRequestFullscreen) await target.webkitRequestFullscreen();
+      else throw new Error('element fullscreen unsupported');
+    } catch {
+      // No native fullscreen (iPhone Safari): the CSS layer is the whole feature there.
+      immersiveRef.current = true;
+    }
+    setIsFullscreen(true);
+    const orientation = window.screen?.orientation as LockableOrientation | undefined;
+    await orientation?.lock?.('landscape').catch(() => {});
+  }, [exitFullscreen]);
+
+  useEffect(() => {
+    const sync = () => {
+      if (nativeFullscreenElement()) setIsFullscreen(true);
+      else if (!immersiveRef.current) setIsFullscreen(false);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && immersiveRef.current) void exitFullscreen();
+    };
+    document.addEventListener('fullscreenchange', sync);
+    document.addEventListener('webkitfullscreenchange', sync);
+    window.addEventListener('keydown', escape);
+    return () => {
+      document.removeEventListener('fullscreenchange', sync);
+      document.removeEventListener('webkitfullscreenchange', sync);
+      window.removeEventListener('keydown', escape);
+    };
+  }, [exitFullscreen]);
+
+  useEffect(() => {
+    if (!isFullscreen) return;
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = previous; };
+  }, [isFullscreen]);
+
   return (
     <main className="site-shell">
       <header className="topbar">
@@ -299,8 +368,33 @@ export default function Home() {
           <p className="privacy">Audio is analyzed on this device. Nothing is recorded or uploaded.</p>
         </div>
 
-        <div className="game-frame">
+        <div className={`game-frame ${isFullscreen ? 'is-fullscreen' : ''}`} ref={frameRef}>
           <canvas ref={canvasRef} className="game-canvas" aria-label="HumBird voice-controlled game field" />
+          <button
+            className="fullscreen-toggle"
+            type="button"
+            onClick={() => void toggleFullscreen()}
+            aria-pressed={isFullscreen}
+            aria-label={isFullscreen ? 'Leave fullscreen' : 'Play fullscreen'}
+          >
+            <span aria-hidden="true">{isFullscreen ? '⤡' : '⤢'}</span>{isFullscreen ? 'Exit' : 'Fullscreen'}
+          </button>
+          {isFullscreen && <p className="rotate-hint">Rotate your phone for a bigger view</p>}
+          {isFullscreen && micOn && (
+            <div className="frame-sensitivity">
+              <label htmlFor="sensitivity-fullscreen">MIC <b>{sensitivity}</b></label>
+              <input
+                id="sensitivity-fullscreen"
+                type="range"
+                min={SENSITIVITY_MIN}
+                max={SENSITIVITY_MAX}
+                step={1}
+                value={sensitivity}
+                onChange={(event) => changeSensitivity(Number(event.target.value))}
+                aria-label="Microphone sensitivity"
+              />
+            </div>
+          )}
           <div className="score-hud" aria-live="polite"><span>SCORE</span><strong>{score}</strong><small>BEST {highScore}</small></div>
           <div className="pitch-card" aria-live="polite">
             <span>VOICE POWER</span><strong>{micOn ? `${liftPercent}%` : '—'}</strong>
