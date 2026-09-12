@@ -11,7 +11,19 @@ import {
   type GamePhase,
   type GameState,
 } from './game-core';
-import { analyzeVoiceLevel, followVoicePower, voicePowerFromLevel, type VoiceSample } from './voice';
+import {
+  SENSITIVITY_INITIAL,
+  SENSITIVITY_MAX,
+  SENSITIVITY_MIN,
+  analyzeVoiceLevel,
+  createCalibration,
+  followVoicePower,
+  rangeFromCalibration,
+  updateCalibration,
+  voicePowerFromCalibration,
+  type VoiceRange,
+  type VoiceSample,
+} from './voice';
 
 type AudioRig = {
   stream: MediaStream;
@@ -107,6 +119,8 @@ export default function Home() {
   const phaseRef = useRef<GamePhase>('intro');
   const liftRef = useRef(0);
   const lastUiRef = useRef(0);
+  const calibrationRef = useRef(createCalibration());
+  const sensitivityRef = useRef(SENSITIVITY_INITIAL);
   const [phase, setPhase] = useState<GamePhase>('intro');
   const [voice, setVoice] = useState<VoiceSample>(initialVoice);
   const [micOn, setMicOn] = useState(false);
@@ -115,12 +129,21 @@ export default function Home() {
   const [score, setScore] = useState(0);
   const [highScore, setHighScore] = useState(0);
   const [error, setError] = useState('');
+  const [sensitivity, setSensitivity] = useState(SENSITIVITY_INITIAL);
+  const [range, setRange] = useState<VoiceRange>(() => rangeFromCalibration(createCalibration(), SENSITIVITY_INITIAL));
 
   const changePhase = useCallback((next: GamePhase) => { phaseRef.current = next; setPhase(next); }, []);
 
   useEffect(() => {
     const stored = Number(window.localStorage.getItem('humbird-high-score') || 0);
-    const loadScore = window.setTimeout(() => { if (Number.isFinite(stored)) setHighScore(stored); }, 0);
+    const storedSensitivity = Number(window.localStorage.getItem('humbird-sensitivity'));
+    const loadScore = window.setTimeout(() => {
+      if (Number.isFinite(stored)) setHighScore(stored);
+      if (Number.isFinite(storedSensitivity) && storedSensitivity >= SENSITIVITY_MIN && storedSensitivity <= SENSITIVITY_MAX) {
+        sensitivityRef.current = storedSensitivity;
+        setSensitivity(storedSensitivity);
+      }
+    }, 0);
     return () => {
       window.clearTimeout(loadScore);
       const rig = audioRef.current;
@@ -133,7 +156,7 @@ export default function Home() {
     const rig = audioRef.current;
     rig?.stream.getTracks().forEach((track) => track.stop());
     if (rig && rig.context.state !== 'closed') void rig.context.close();
-    audioRef.current = null; liftRef.current = 0;
+    audioRef.current = null; liftRef.current = 0; calibrationRef.current = createCalibration();
     setMicOn(false); setLiftPercent(0); setVoice(initialVoice); setError(''); changePhase('intro');
   }, [changePhase]);
 
@@ -149,6 +172,7 @@ export default function Home() {
       const analyser = context.createAnalyser(); analyser.fftSize = 1024; analyser.smoothingTimeConstant = 0;
       context.createMediaStreamSource(stream).connect(analyser);
       audioRef.current = { stream, context, analyser, samples: new Float32Array(analyser.fftSize) };
+      calibrationRef.current = createCalibration();
       setMicOn(true);
       changePhase('ready');
     } catch (reason) {
@@ -189,10 +213,14 @@ export default function Home() {
       if (rig) {
         if (rig.context.state === 'suspended' && phaseRef.current === 'playing') changePhase('paused');
         rig.analyser.getFloatTimeDomainData(rig.samples);
-        sample = analyzeVoiceLevel(rig.samples, .008, now);
-        const targetPower = voicePowerFromLevel(sample.level, .01, .14);
+        const phaseNow = phaseRef.current;
+        const listening = phaseNow === 'ready' || phaseNow === 'countdown' || phaseNow === 'playing';
+        sample = analyzeVoiceLevel(rig.samples, calibrationRef.current.noiseFloor * 1.6, now);
+        if (listening) calibrationRef.current = updateCalibration(calibrationRef.current, sample.level, dt);
+        const voiceRange = rangeFromCalibration(calibrationRef.current, sensitivityRef.current);
+        const targetPower = voicePowerFromCalibration(sample.level, calibrationRef.current, sensitivityRef.current);
         liftRef.current = followVoicePower(liftRef.current, targetPower);
-        if (now - lastUiRef.current > 45) { setVoice(sample); setLiftPercent(Math.round(liftRef.current * 100)); lastUiRef.current = now; }
+        if (now - lastUiRef.current > 45) { setVoice(sample); setLiftPercent(Math.round(liftRef.current * 100)); setRange(voiceRange); lastUiRef.current = now; }
       }
       if (phaseRef.current === 'playing') {
         accumulator += dt;
@@ -211,7 +239,20 @@ export default function Home() {
     return () => cancelAnimationFrame(frame);
   }, [changePhase]);
 
-  const levelPercent = Math.min(100, Math.round(voice.level * 700));
+  const levelPercent = Math.min(100, Math.round((voice.level / Math.max(range.loud, 0.001)) * 100));
+  const thresholdPercent = Math.min(100, Math.round((range.quiet / Math.max(range.loud, 0.001)) * 100));
+
+  const changeSensitivity = useCallback((next: number) => {
+    const clamped = Math.max(SENSITIVITY_MIN, Math.min(SENSITIVITY_MAX, next));
+    sensitivityRef.current = clamped;
+    setSensitivity(clamped);
+    window.localStorage.setItem('humbird-sensitivity', String(clamped));
+  }, []);
+
+  const recalibrate = useCallback(() => {
+    calibrationRef.current = createCalibration();
+    liftRef.current = 0;
+  }, []);
 
   return (
     <main className="site-shell">
@@ -231,7 +272,27 @@ export default function Home() {
           <p className="lede">Every sound gives lift. Speak softly to hover, get louder to climb, and go quiet to glide down.</p>
           {phase === 'intro' && <button className="primary-button" type="button" onClick={enableMicrophone}><span className="button-icon">●</span>Enable microphone<span aria-hidden="true">↗</span></button>}
           {phase === 'microphone-error' && <button className="primary-button" type="button" onClick={enableMicrophone}><span className="button-icon">↻</span>Try microphone again<span aria-hidden="true">↗</span></button>}
-          {micOn && phase !== 'intro' && phase !== 'microphone-error' && <div className="range-summary"><span>VOICE POWER</span><strong>{liftPercent}%</strong><small>Any speech works · louder = more lift</small></div>}
+          {micOn && phase !== 'intro' && phase !== 'microphone-error' && (
+            <div className="range-summary">
+              <span>VOICE POWER</span><strong>{liftPercent}%</strong>
+              <small>Above 50% climbs · below 50% sinks</small>
+              <div className="sensitivity">
+                <label htmlFor="sensitivity">MIC SENSITIVITY <b>{sensitivity}</b></label>
+                <input
+                  id="sensitivity"
+                  type="range"
+                  min={SENSITIVITY_MIN}
+                  max={SENSITIVITY_MAX}
+                  step={1}
+                  value={sensitivity}
+                  onChange={(event) => changeSensitivity(Number(event.target.value))}
+                  aria-describedby="sensitivity-hint"
+                />
+                <p id="sensitivity-hint">Bird too heavy? Slide right — {SENSITIVITY_MAX} lets a whisper fly. Too twitchy? Slide left.</p>
+                <button className="text-button" type="button" onClick={recalibrate}>Recalibrate mic</button>
+              </div>
+            </div>
+          )}
           <p className="privacy">Audio is analyzed on this device. Nothing is recorded or uploaded.</p>
         </div>
 
@@ -240,7 +301,7 @@ export default function Home() {
           <div className="score-hud" aria-live="polite"><span>SCORE</span><strong>{score}</strong><small>BEST {highScore}</small></div>
           <div className="pitch-card" aria-live="polite">
             <span>VOICE POWER</span><strong>{micOn ? `${liftPercent}%` : '—'}</strong>
-            <div className="level-track" title="Microphone input level"><i style={{ width: `${levelPercent}%` }} /></div>
+            <div className="level-track" title="Microphone input level"><i style={{ width: `${levelPercent}%` }} /><b className="level-threshold" style={{ left: `${thresholdPercent}%` }} /></div>
             <div className="pitch-scale"><i className={liftPercent > 5 ? 'active' : ''}/><i className={liftPercent > 25 ? 'active' : ''}/><i className={liftPercent > 45 ? 'active' : ''}/><i className={liftPercent > 65 ? 'active' : ''}/><i className={liftPercent > 85 ? 'active' : ''}/></div>
             <small>QUIET <b>HOVER</b> SHOUT</small>
           </div>
